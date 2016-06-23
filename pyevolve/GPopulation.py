@@ -9,7 +9,7 @@ Default Parameters
 -------------------------------------------------------------
 
 *Sort Type*
-
+   
    >>> Consts.sortType["scaled"]
 
    The scaled sort type
@@ -32,12 +32,13 @@ Class
 
 """
 
-import Consts
-import Util
+import Consts, Util
 from FunctionSlot import FunctionSlot
 from Statistics import Statistics
 from math import sqrt as math_sqrt
 import logging
+
+from mpi_pool import MPIPool
 
 try:
    from multiprocessing import cpu_count, Pool
@@ -83,7 +84,7 @@ def multiprocessing_eval_full(ind):
    return ind
 
 
-class GPopulation(object):
+class GPopulation:
    """ GPopulation Class - The container for the population
 
    **Examples**
@@ -105,7 +106,7 @@ class GPopulation(object):
          >>> for ind in pop:
          >>>   print ind
          (...)
-
+         
          >>> for i in xrange(len(pop)):
          >>>    print pop[i]
          (...)
@@ -122,53 +123,67 @@ class GPopulation(object):
       """ The GPopulation Class creator """
 
       if isinstance(genome, GPopulation):
-         self.oneSelfGenome = genome.oneSelfGenome
-         self.internalPop = []
+         self.oneSelfGenome  = genome.oneSelfGenome
+         self.internalPop    = []
          self.internalPopRaw = []
-         self.popSize = genome.popSize
-         self.sortType = genome.sortType
-         self.sorted = False
-         self.minimax = genome.minimax
-         self.scaleMethod = genome.scaleMethod
-         self.allSlots = [self.scaleMethod]
+         self.popSize       = genome.popSize
+         self.sortType      = genome.sortType
+         self.sorted        = False
+         self.minimax       = genome.minimax
+         self.scaleMethod   = genome.scaleMethod
+         self.allSlots      = [self.scaleMethod]
 
          self.internalParams = genome.internalParams
          self.multiProcessing = genome.multiProcessing
+         try:
+            logging.debug("do I have a comm?")
+            self.mpi_comm = genome.mpi_comm
+            self.mpi_myeval = genome.mpi_myeval
+            self.mpi_full_copy = genome.mpi_full_copy
+            logging.debug("I do")
+         except:
+            logging.debug("I do not")
+            pass
 
          self.statted = False
-         self.stats = Statistics()
+         self.stats   = Statistics()
          return
 
       logging.debug("New population instance, %s class genomes.", genome.__class__.__name__)
-      self.oneSelfGenome = genome
-      self.internalPop = []
+      self.oneSelfGenome  = genome
+      self.internalPop    = []
       self.internalPopRaw = []
-      self.popSize = 0
-      self.sortType = Consts.CDefPopSortType
-      self.sorted = False
-      self.minimax = Consts.CDefPopMinimax
-      self.scaleMethod = FunctionSlot("Scale Method")
+      self.popSize       = 0
+      self.sortType      = Consts.CDefPopSortType
+      self.sorted        = False
+      self.minimax       = Consts.CDefPopMinimax
+      self.scaleMethod   = FunctionSlot("Scale Method")
       self.scaleMethod.set(Consts.CDefPopScale)
-      self.allSlots = [self.scaleMethod]
+      self.allSlots      = [self.scaleMethod]
 
       self.internalParams = {}
-      self.multiProcessing = (False, False, None)
+      self.multiProcessing = (False, False)
 
       # Statistics
       self.statted = False
-      self.stats = Statistics()
+      self.stats   = Statistics()
 
-   def setMultiProcessing(self, flag=True, full_copy=False, max_processes=None):
+   def setMPIComm(self, comm, func, full_copy=False):
+      self.mpi_comm = comm
+      self.mpi_myeval = func
+      self.mpi_full_copy = full_copy
+      logging.debug("setting population's mpi_comm")
+
+   def setMultiProcessing(self, flag=True, full_copy=False):
       """ Sets the flag to enable/disable the use of python multiprocessing module.
       Use this option when you have more than one core on your CPU and when your
       evaluation function is very slow.
       The parameter "full_copy" defines where the individual data should be copied back
       after the evaluation or not. This parameter is useful when you change the
       individual in the evaluation function.
-
+      
       :param flag: True (default) or False
       :param full_copy: True or False (default)
-      :param max_processes: None (default) or an integer value
 
       .. warning:: Use this option only when your evaluation function is slow, se you
                    will get a good tradeoff between the process communication speed and the
@@ -178,14 +193,14 @@ class GPopulation(object):
          The `setMultiProcessing` method.
 
       """
-      self.multiProcessing = (flag, full_copy, max_processes)
-
+      self.multiProcessing = (flag, full_copy)
+   
    def setMinimax(self, minimax):
       """ Sets the population minimax
 
       Example:
          >>> pop.setMinimax(Consts.minimaxType["maximize"])
-
+   
       :param minimax: the minimax type
 
       """
@@ -193,20 +208,20 @@ class GPopulation(object):
 
    def __repr__(self):
       """ Returns the string representation of the population """
-      ret = "- GPopulation\n"
+      ret =  "- GPopulation\n"
       ret += "\tPopulation Size:\t %d\n" % (self.popSize,)
       ret += "\tSort Type:\t\t %s\n" % (Consts.sortType.keys()[Consts.sortType.values().index(self.sortType)].capitalize(),)
       ret += "\tMinimax Type:\t\t %s\n" % (Consts.minimaxType.keys()[Consts.minimaxType.values().index(self.minimax)].capitalize(),)
       for slot in self.allSlots:
-         ret += "\t" + slot.__repr__()
-      ret += "\n"
-      ret += self.stats.__repr__()
+         ret+= "\t" + slot.__repr__()
+      ret+="\n"
+      ret+= self.stats.__repr__()
       return ret
 
    def __len__(self):
       """ Return the length of population """
       return len(self.internalPop)
-
+      
    def __getitem__(self, key):
       """ Returns the specified individual from population """
       return self.internalPop[key]
@@ -232,30 +247,33 @@ class GPopulation(object):
 
       """
       self.statistics()
-      return self.stats
+      return self.stats      
 
    def statistics(self):
       """ Do statistical analysis of population and set 'statted' to True """
-      if self.statted:
-         return
+      if self.statted: return
       logging.debug("Running statistical calculations")
       raw_sum = 0
+      fit_sum = 0
 
       len_pop = len(self)
       for ind in xrange(len_pop):
          raw_sum += self[ind].score
+         #fit_sum += self[ind].fitness
 
       self.stats["rawMax"] = max(self, key=key_raw_score).score
       self.stats["rawMin"] = min(self, key=key_raw_score).score
       self.stats["rawAve"] = raw_sum / float(len_pop)
-
+      #self.stats["rawTot"] = raw_sum
+      #self.stats["fitTot"] = fit_sum
+      
       tmpvar = 0.0
       for ind in xrange(len_pop):
          s = self[ind].score - self.stats["rawAve"]
-         s *= s
+         s*= s
          tmpvar += s
 
-      tmpvar /= float((len(self) - 1))
+      tmpvar/= float((len(self) - 1))
       try:
          self.stats["rawDev"] = math_sqrt(tmpvar)
       except:
@@ -275,15 +293,6 @@ class GPopulation(object):
       self.sort()
       return self.internalPop[index]
 
-   def worstFitness(self):
-      """ Return the worst scaled fitness individual of the population
-
-      :rtype: the individual
-
-      """
-      self.sort()
-      return self.internalPop[-1]
-
    def bestRaw(self, index=0):
       """ Return the best raw score individual of population
 
@@ -292,7 +301,7 @@ class GPopulation(object):
 
       .. versionadded:: 0.6
          The parameter `index`.
-
+      
       """
       if self.sortType == Consts.sortType["raw"]:
          return self.internalPop[index]
@@ -300,25 +309,9 @@ class GPopulation(object):
          self.sort()
          return self.internalPopRaw[index]
 
-   def worstRaw(self):
-      """ Return the worst raw score individual of population
-
-      :rtype: the individual
-
-      .. versionadded:: 0.6
-         The parameter `index`.
-
-      """
-      if self.sortType == Consts.sortType["raw"]:
-         return self.internalPop[-1]
-      else:
-         self.sort()
-         return self.internalPopRaw[-1]
-
    def sort(self):
       """ Sort the population """
-      if self.sorted:
-         return
+      if self.sorted: return
       rev = (self.minimax == Consts.minimaxType["maximize"])
 
       if self.sortType == Consts.sortType["raw"]:
@@ -365,9 +358,9 @@ class GPopulation(object):
       """ Initialize all individuals of population,
       this calls the initialize() of individuals """
       logging.debug("Initializing the population")
-
+   
       if self.oneSelfGenome.getParam("full_diversity", True) and hasattr(self.oneSelfGenome, "compare"):
-         for i in xrange(len(self.internalPop)):
+        for i in xrange(len(self.internalPop)):
             curr = self.internalPop[i]
             curr.initialize(**args)
             while self.__findIndividual(curr, i):
@@ -379,14 +372,14 @@ class GPopulation(object):
 
    def evaluate(self, **args):
       """ Evaluate all individuals in population, calls the evaluate() method of individuals
-
+   
       :param args: this params are passed to the evaluation function
 
       """
       # We have multiprocessing
       if self.multiProcessing[0] and MULTI_PROCESSING:
          logging.debug("Evaluating the population using the multiprocessing method")
-         proc_pool = Pool(processes=self.multiProcessing[2])
+         proc_pool = Pool()
 
          # Multiprocessing full_copy parameter
          if self.multiProcessing[1]:
@@ -401,9 +394,25 @@ class GPopulation(object):
             proc_pool.join()
             for individual, score in zip(self.internalPop, results):
                individual.score = score
+      elif self.mpi_comm.Get_size() > 1:
+         logging.debug("Evaluating the population using the MPIPool method")
+         proc_pool = MPIPool(self.mpi_comm, debug=False, send_result=True)
+         results = proc_pool.map(self.mpi_myeval, self.internalPop)
+         proc_pool.close()
+         if (self.mpi_comm.Get_rank()==0):
+#            print "right after map eval, idx and result[i]"
+            for i in xrange(len(self.internalPop)):
+               if (self.mpi_full_copy):
+#                  print i, results[i]
+                  self.internalPop[i].assign_results(results[i])   ## results is [score,wt_positions] (genome specific)
+               else:
+                  self.internalPop[i].score = results[i]  ## results is just score
       else:
+         logging.debug("Evaluating the population serially")
          for ind in self.internalPop:
-            ind.evaluate(**args)
+#            import pdb; pdb.set_trace()
+            ind.evaluate(**args)         
+#            print "Evaluated ", ind, "score is ", ind.score
 
       self.clearFlags()
 
@@ -449,9 +458,10 @@ class GPopulation(object):
       pop.sortType = self.sortType
       pop.minimax = self.minimax
       pop.scaleMethod = self.scaleMethod
+      #pop.internalParams = self.internalParams.copy()
       pop.internalParams = self.internalParams
       pop.multiProcessing = self.multiProcessing
-
+   
    def getParam(self, key, nvl=None):
       """ Gets an internal parameter
 
@@ -464,6 +474,7 @@ class GPopulation(object):
 
       """
       return self.internalParams.get(key, nvl)
+
 
    def setParams(self, **args):
       """ Gets an internal parameter
@@ -483,9 +494,11 @@ class GPopulation(object):
       del self.internalPop[:]
       del self.internalPopRaw[:]
       self.clearFlags()
-
+      
    def clone(self):
       """ Return a brand-new cloned population """
       newpop = GPopulation(self.oneSelfGenome)
       self.copy(newpop)
       return newpop
+      
+

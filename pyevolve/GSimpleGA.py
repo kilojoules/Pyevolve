@@ -1,3 +1,4 @@
+
 """
 
 :mod:`GSimpleGA` -- the genetic algorithm by itself
@@ -16,7 +17,7 @@ Default Parameters
 
 *Mutation Rate*
 
-   Default is 0.02, which represents 2%
+   Default is 0.02, which represents 0.2%
 
 *Crossover Rate*
 
@@ -58,832 +59,828 @@ Class
 -------------------------------------------------------------
 
 """
-import random
-import logging
-from time import time
-from types import BooleanType
-from sys import platform as sys_platform
-from sys import stdout as sys_stdout
-import code
 
-from GPopulation import GPopulation
+from GPopulation  import GPopulation
 from FunctionSlot import FunctionSlot
-from GenomeBase import GenomeBase
-from DBAdapters import DBBaseAdapter
+from Migration    import MigrationScheme
+from GenomeBase   import GenomeBase
+from DBAdapters   import DBBaseAdapter
+
 import Consts
 import Util
+
+import random
+import logging
+
+from time  import time
+from types import BooleanType
+from sys   import platform as sys_platform
+from sys   import stdout as sys_stdout
+
+import code
 import pyevolve
+
+from mpi4py import MPI
 
 # Platform dependant code for the Interactive Mode
 if sys_platform[:3] == "win":
-    import msvcrt
-
+   import msvcrt
 
 def RawScoreCriteria(ga_engine):
-    """ Terminate the evolution using the **bestrawscore** and **rounddecimal**
-    parameter obtained from the individual
+   """ Terminate the evolution using the **bestrawscore** and **rounddecimal**
+   parameter obtained from the individual
 
-    Example:
-       >>> genome.setParams(bestrawscore=0.00, rounddecimal=2)
-       (...)
-       >>> ga_engine.terminationCriteria.set(GSimpleGA.RawScoreCriteria)
+   Example:
+      >>> genome.setParams(bestrawscore=0.00, rounddecimal=2)
+      (...)
+      >>> ga_engine.terminationCriteria.set(GSimpleGA.RawScoreCriteria)
 
-    """
-    ind = ga_engine.bestIndividual()
-    bestRawScore = ind.getParam("bestrawscore")
-    roundDecimal = ind.getParam("rounddecimal")
+   """
+   ind = ga_engine.bestIndividual()
+   bestRawScore = ind.getParam("bestrawscore")
+   roundDecimal = ind.getParam("rounddecimal")
 
-    if bestRawScore is None:
-        Util.raiseException("you must specify the bestrawscore parameter", ValueError)
+   if bestRawScore is None:
+      Util.raiseException("you must specify the bestrawscore parameter", ValueError)
 
-    if ga_engine.getMinimax() == Consts.minimaxType["maximize"]:
-        if roundDecimal is not None:
-            return round(bestRawScore, roundDecimal) <= round(ind.score, roundDecimal)
-        else:
-            return bestRawScore <= ind.score
-    else:
-        if roundDecimal is not None:
-            return round(bestRawScore, roundDecimal) >= round(ind.score, roundDecimal)
-        else:
-            return bestRawScore >= ind.score
-
+   if ga_engine.getMinimax() == Consts.minimaxType["maximize"]:
+      if roundDecimal is not None:
+         return round(bestRawScore, roundDecimal) <= round(ind.score, roundDecimal)
+      else:
+         return bestRawScore <= ind.score
+   else:
+      if roundDecimal is not None:
+         return round(bestRawScore, roundDecimal) >= round(ind.score, roundDecimal)
+      else:
+         return bestRawScore >= ind.score
 
 def ConvergenceCriteria(ga_engine):
-    """ Terminate the evolution when the population have converged
+   """ Terminate the evolution when the population have converged
 
-    Example:
-       >>> ga_engine.terminationCriteria.set(GSimpleGA.ConvergenceCriteria)
+   Example:
+      >>> ga_engine.terminationCriteria.set(GSimpleGA.ConvergenceCriteria)
 
-    """
-    pop = ga_engine.getPopulation()
-    return pop[0] == pop[len(pop) - 1]
-
+   """
+   pop = ga_engine.getPopulation()
+   return pop[0] == pop[len(pop)-1]
 
 def RawStatsCriteria(ga_engine):
-    """ Terminate the evolution based on the raw stats
+   """ Terminate the evolution based on the raw stats
 
-    Example:
-       >>> ga_engine.terminationCriteria.set(GSimpleGA.RawStatsCriteria)
+   Example:
+      >>> ga_engine.terminationCriteria.set(GSimpleGA.RawStatsCriteria)
 
-    """
-    stats = ga_engine.getStatistics()
-    if stats["rawMax"] == stats["rawMin"]:
-        if stats["rawAve"] == stats["rawMax"]:
-            return True
-    return False
-
+   """
+   stats = ga_engine.getStatistics()
+   if stats["rawMax"] == stats["rawMin"]:
+      if stats["rawAve"] == stats["rawMax"]:
+         return True
+   return False
 
 def FitnessStatsCriteria(ga_engine):
-    """ Terminate the evoltion based on the fitness stats
+   """ Terminate the evoltion based on the fitness stats
 
-    Example:
-       >>> ga_engine.terminationCriteria.set(GSimpleGA.FitnessStatsCriteria)
+   Example:
+      >>> ga_engine.terminationCriteria.set(GSimpleGA.FitnessStatsCriteria)
 
 
-    """
-    stats = ga_engine.getStatistics()
-    if stats["fitMax"] == stats["fitMin"]:
-        if stats["fitAve"] == stats["fitMax"]:
-            return True
-    return False
+   """
+   stats = ga_engine.getStatistics()
+   if stats["fitMax"] == stats["fitMin"]:
+      if stats["fitAve"] == stats["fitMax"]:
+         return True
+   return False
 
+class GSimpleGA:
+   """ GA Engine Class - The Genetic Algorithm Core
 
-class GSimpleGA(object):
-    """ GA Engine Class - The Genetic Algorithm Core
+   Example:
+      >>> ga = GSimpleGA.GSimpleGA(genome)
+      >>> ga.selector.set(Selectors.GRouletteWheel)
+      >>> ga.setGenerations(120)
+      >>> ga.terminationCriteria.set(GSimpleGA.ConvergenceCriteria)
 
-    Example:
-       >>> ga = GSimpleGA.GSimpleGA(genome)
-       >>> ga.selector.set(Selectors.GRouletteWheel)
-       >>> ga.setGenerations(120)
-       >>> ga.terminationCriteria.set(GSimpleGA.ConvergenceCriteria)
+   :param genome: the :term:`Sample Genome`
+   :param interactiveMode: this flag enables the Interactive Mode, the default is True
+   :param seed: the random seed value
 
-    :param genome: the :term:`Sample Genome`
-    :param interactiveMode: this flag enables the Interactive Mode, the default is True
-    :param seed: the random seed value
+   .. note:: if you use the same random seed, all the runs of algorithm will be the same
 
-    .. note:: if you use the same random seed, all the runs of algorithm will be the same
+   """
 
-    """
+   selector = None
+   """ This is the function slot for the selection method
+   if you want to change the default selector, you must do this: ::
 
-    selector = None
-    """ This is the function slot for the selection method
-    if you want to change the default selector, you must do this: ::
+      ga_engine.selector.set(Selectors.GRouletteWheel) """
 
-       ga_engine.selector.set(Selectors.GRouletteWheel) """
+   stepCallback = None
+   """ This is the :term:`step callback function` slot,
+   if you want to set the function, you must do this: ::
 
-    stepCallback = None
-    """ This is the :term:`step callback function` slot,
-    if you want to set the function, you must do this: ::
+      def your_func(ga_engine):
+         # Here you have access to the GA Engine
+         return False
 
-       def your_func(ga_engine):
-          # Here you have access to the GA Engine
-          return False
+      ga_engine.stepCallback.set(your_func)
 
-       ga_engine.stepCallback.set(your_func)
+   now *"your_func"* will be called every generation.
+   When this function returns True, the GA Engine will stop the evolution and show
+   a warning, if is False, the evolution continues.
+   """
 
-    now *"your_func"* will be called every generation.
-    When this function returns True, the GA Engine will stop the evolution and show
-    a warning, if False, the evolution continues.
-    """
+   terminationCriteria = None
+   """ This is the termination criteria slot, if you want to set one
+   termination criteria, you must do this: ::
 
-    terminationCriteria = None
-    """ This is the termination criteria slot, if you want to set one
-    termination criteria, you must do this: ::
+      ga_engine.terminationCriteria.set(GSimpleGA.ConvergenceCriteria)
 
-       ga_engine.terminationCriteria.set(GSimpleGA.ConvergenceCriteria)
+   Now, when you run your GA, it will stop when the population converges.
 
-    Now, when you run your GA, it will stop when the population converges.
+   There are those termination criteria functions: :func:`GSimpleGA.RawScoreCriteria`, :func:`GSimpleGA.ConvergenceCriteria`, :func:`GSimpleGA.RawStatsCriteria`, :func:`GSimpleGA.FitnessStatsCriteria`
 
-    There are those termination criteria functions: :func:`GSimpleGA.RawScoreCriteria`,
-    :func:`GSimpleGA.ConvergenceCriteria`, :func:`GSimpleGA.RawStatsCriteria`, :func:`GSimpleGA.FitnessStatsCriteria`
+   But you can create your own termination function, this function receives
+   one parameter which is the GA Engine, follows an example: ::
 
-    But you can create your own termination function, this function receives
-    one parameter which is the GA Engine, follows an example: ::
+      def ConvergenceCriteria(ga_engine):
+         pop = ga_engine.getPopulation()
+         return pop[0] == pop[len(pop)-1]
 
-       def ConvergenceCriteria(ga_engine):
-          pop = ga_engine.getPopulation()
-          return pop[0] == pop[len(pop)-1]
+   When this function returns True, the GA Engine will stop the evolution and show
+   a warning, if is False, the evolution continues, this function is called every
+   generation.
+   """
 
-    When this function returns True, the GA Engine will stop the evolution and show
-    a warning, if False, the evolution continues, this function is called every
-    generation.
-    """
+   def __init__(self, genome, owner, seed=None, interactiveMode=True):
+      """ Initializator of GSimpleGA """
+      if seed: random.seed(seed)
 
-    def __init__(self, genome, seed=None, interactiveMode=True):
-        """ Initializator of GSimpleGA """
-        if seed:
-            random.seed(seed)
+      if type(interactiveMode) != BooleanType:
+         Util.raiseException("Interactive Mode option must be True or False", TypeError)
 
-        if type(interactiveMode) != BooleanType:
-            Util.raiseException("Interactive Mode option must be True or False", TypeError)
+      if not isinstance(genome, GenomeBase):
+         Util.raiseException("The genome must be a GenomeBase subclass", TypeError)
 
-        if not isinstance(genome, GenomeBase):
-            Util.raiseException("The genome must be a GenomeBase subclass", TypeError)
+      self.internalPop  = GPopulation(genome)
+      self.nGenerations = Consts.CDefGAGenerations
+      self.pMutation    = Consts.CDefGAMutationRate
+      self.pCrossover   = Consts.CDefGACrossoverRate
+      self.nElitismReplacement = Consts.CDefGAElitismReplacement
+      self.setPopulationSize(Consts.CDefGAPopulationSize)
+      self.minimax      = Consts.minimaxType["maximize"]
+      self.elitism      = True
 
-        self.internalPop = GPopulation(genome)
-        self.nGenerations = Consts.CDefGAGenerations
-        self.pMutation = Consts.CDefGAMutationRate
-        self.pCrossover = Consts.CDefGACrossoverRate
-        self.nElitismReplacement = Consts.CDefGAElitismReplacement
-        self.setPopulationSize(Consts.CDefGAPopulationSize)
-        self.minimax = Consts.minimaxType["maximize"]
-        self.elitism = True
+      self.owner = owner  ## added 12/15 by Peter Graf, so GA can evaluate constraints
+                          ## and, now (4/16), so we can save let the owner save the state
+      # Adapters
+      self.dbAdapter        = None
+      self.migrationAdapter = None
 
-        # Adapters
-        self.dbAdapter = None
-        self.migrationAdapter = None
+      self.time_init       = None
+      self.interactiveMode = interactiveMode
+      self.interactiveGen  = -1
+      self.GPMode = False
 
-        self.time_init = None
-        self.max_time = None
-        self.interactiveMode = interactiveMode
-        self.interactiveGen = -1
-        self.GPMode = False
+      self.selector            = FunctionSlot("Selector")
+      self.stepCallback        = FunctionSlot("Generation Step Callback")
+      self.terminationCriteria = FunctionSlot("Termination Criteria")
+      self.selector.set(Consts.CDefGASelector)
+      self.allSlots            = [ self.selector, self.stepCallback, self.terminationCriteria ]
 
-        self.selector = FunctionSlot("Selector")
-        self.stepCallback = FunctionSlot("Generation Step Callback")
-        self.terminationCriteria = FunctionSlot("Termination Criteria")
-        self.selector.set(Consts.CDefGASelector)
-        self.allSlots = (self.selector, self.stepCallback, self.terminationCriteria)
+      self.internalParams = {}
 
-        self.internalParams = {}
+      self.currentGeneration = 0
 
-        self.currentGeneration = 0
+      # GP Testing
+      for classes in Consts.CDefGPGenomes:
+         if  isinstance(self.internalPop.oneSelfGenome, classes):
+            self.setGPMode(True)
+            break
 
-        # GP Testing
-        for classes in Consts.CDefGPGenomes:
-            if isinstance(self.internalPop.oneSelfGenome, classes):
-                self.setGPMode(True)
-                break
+      logging.debug("A GA Engine was created, nGenerations=%d", self.nGenerations)
 
-        logging.debug("A GA Engine was created, nGenerations=%d", self.nGenerations)
+   def setGPMode(self, bool_value):
+      """ Sets the Genetic Programming mode of the GA Engine
 
-    def setGPMode(self, bool_value):
-        """ Sets the Genetic Programming mode of the GA Engine
+      :param bool_value: True or False
+      """
+      self.GPMode = bool_value
 
-        :param bool_value: True or False
-        """
-        self.GPMode = bool_value
+   def getGPMode(self):
+      """ Get the Genetic Programming mode of the GA Engine
 
-    def getGPMode(self):
-        """ Get the Genetic Programming mode of the GA Engine
+      :rtype: True or False
+      """
+      return self.GPMode
 
-        :rtype: True or False
-        """
-        return self.GPMode
+   def __call__(self, *args, **kwargs):
+      """ A method to implement a callable object
 
-    def __call__(self, *args, **kwargs):
-        """ A method to implement a callable object
+      Example:
+         >>> ga_engine(freq_stats=10)
 
-        Example:
-           >>> ga_engine(freq_stats=10)
+      .. versionadded:: 0.6
+         The callable method.
+      """
+      if kwargs.get("freq_stats", None):
+         return self.evolve(kwargs.get("freq_stats"))
+      else:
+         return self.evolve()
 
-        .. versionadded:: 0.6
-           The callable method.
-        """
-        if kwargs.get("freq_stats", None):
-            return self.evolve(kwargs.get("freq_stats"))
-        else:
-            return self.evolve()
-
-    def setParams(self, **args):
-        """ Set the internal params
-
-        Example:
-           >>> ga.setParams(gp_terminals=['x', 'y'])
-
-
-        :param args: params to save
-
-        ..versionaddd:: 0.6
-           Added the *setParams* method.
-        """
-        self.internalParams.update(args)
-
-    def getParam(self, key, nvl=None):
-        """ Gets an internal parameter
-
-        Example:
-           >>> ga.getParam("gp_terminals")
-           ['x', 'y']
-
-        :param key: the key of param
-        :param nvl: if the key doesn't exist, the nvl will be returned
-
-        ..versionaddd:: 0.6
-           Added the *getParam* method.
-        """
-        return self.internalParams.get(key, nvl)
-
-    def setInteractiveGeneration(self, generation):
-        """ Sets the generation in which the GA must enter in the
-        Interactive Mode
-
-        :param generation: the generation number, use "-1" to disable
-
-        .. versionadded::0.6
-           The *setInteractiveGeneration* method.
-        """
-        if generation < -1:
-            Util.raiseException("Generation must be >= -1", ValueError)
-        self.interactiveGen = generation
-
-    def getInteractiveGeneration(self):
-        """ returns the generation in which the GA must enter in the
-        Interactive Mode
+   def setParams(self, **args):
+      """ Set the internal params
 
-        :rtype: the generation number or -1 if not set
-
-        .. versionadded::0.6
-           The *getInteractiveGeneration* method.
-        """
-        return self.interactiveGen
-
-    def setElitismReplacement(self, numreplace):
-        """ Set the number of best individuals to copy to the next generation on the elitism
-
-        :param numreplace: the number of individuals
+      Example:
+         >>> ga.setParams(gp_terminals=['x', 'y'])
 
-        .. versionadded:: 0.6
-           The *setElitismReplacement* method.
 
-        """
-        if numreplace < 1:
-            Util.raiseException("Replacement number must be >= 1", ValueError)
-        self.nElitismReplacement = numreplace
+      :param args: params to save
 
-    def setInteractiveMode(self, flag=True):
-        """ Enable/disable the interactive mode
+      ..versionaddd:: 0.6
+         Added the *setParams* method.
+      """
+      self.internalParams.update(args)
 
-        :param flag: True or False
+   def getParam(self, key, nvl=None):
+      """ Gets an internal parameter
 
-        .. versionadded: 0.6
-           The *setInteractiveMode* method.
+      Example:
+         >>> ga.getParam("gp_terminals")
+         ['x', 'y']
 
-        """
-        if type(flag) != BooleanType:
-            Util.raiseException("Interactive Mode option must be True or False", TypeError)
-        self.interactiveMode = flag
+      :param key: the key of param
+      :param nvl: if the key doesn't exist, the nvl will be returned
 
-    def __repr__(self):
-        """ The string representation of the GA Engine """
-        minimax_type = Consts.minimaxType.keys()[Consts.minimaxType.values().index(self.minimax)]
-        ret = "- GSimpleGA\n"
-        ret += "\tGP Mode:\t\t %s\n" % self.getGPMode()
-        ret += "\tPopulation Size:\t %d\n" % self.internalPop.popSize
-        ret += "\tGenerations:\t\t %d\n" % self.nGenerations
-        ret += "\tCurrent Generation:\t %d\n" % self.currentGeneration
-        ret += "\tMutation Rate:\t\t %.2f\n" % self.pMutation
-        ret += "\tCrossover Rate:\t\t %.2f\n" % self.pCrossover
-        ret += "\tMinimax Type:\t\t %s\n" % minimax_type.capitalize()
-        ret += "\tElitism:\t\t %s\n" % self.elitism
-        ret += "\tElitism Replacement:\t %d\n" % self.nElitismReplacement
-        ret += "\tDB Adapter:\t\t %s\n" % self.dbAdapter
-        for slot in self.allSlots:
-            ret += "\t" + slot.__repr__()
-        ret += "\n"
-        return ret
+      ..versionaddd:: 0.6
+         Added the *getParam* method.
+      """
+      return self.internalParams.get(key, nvl)
 
-    def setMultiProcessing(self, flag=True, full_copy=False, max_processes=None):
-        """ Sets the flag to enable/disable the use of python multiprocessing module.
-        Use this option when you have more than one core on your CPU and when your
-        evaluation function is very slow.
+   def setInteractiveGeneration(self, generation):
+      """ Sets the generation in which the GA must enter in the
+      Interactive Mode
 
-        Pyevolve will automaticly check if your Python version has **multiprocessing**
-        support and if you have more than one single CPU core. If you don't have support
-        or have just only one core, Pyevolve will not use the **multiprocessing**
-        feature.
+      :param generation: the generation number, use "-1" to disable
 
-        Pyevolve uses the **multiprocessing** to execute the evaluation function over
-        the individuals, so the use of this feature will make sense if you have a
-        truly slow evaluation function (which is commom in GAs).
+      .. versionadded::0.6
+         The *setInteractiveGeneration* method.
+      """
+      if generation < -1:
+         Util.raiseException("Generation must be >= -1", ValueError)
+      self.interactiveGen = generation
 
-        The parameter "full_copy" defines where the individual data should be copied back
-        after the evaluation or not. This parameter is useful when you change the
-        individual in the evaluation function.
+   def getInteractiveGeneration(self):
+      """ returns the generation in which the GA must enter in the
+      Interactive Mode
 
-        :param flag: True (default) or False
-        :param full_copy: True or False (default)
-        :param max_processes: None (default) or an integer value
+      :rtype: the generation number or -1 if not set
 
-        .. warning:: Use this option only when your evaluation function is slow, so you'll
-                     get a good tradeoff between the process communication speed and the
-                     parallel evaluation. The use of the **multiprocessing** doesn't means
-                     always a better performance.
+      .. versionadded::0.6
+         The *getInteractiveGeneration* method.
+      """
+      return self.interactiveGen
 
-        .. note:: To enable the multiprocessing option, you **MUST** add the *__main__* check
-                  on your application, otherwise, it will result in errors. See more on the
-                  `Python Docs <http://docs.python.org/library/multiprocessing.html#multiprocessing-programming>`__
-                  site.
+   def setElitismReplacement(self, numreplace):
+      """ Set the number of best individuals to copy to the next generation on the elitism
 
-        .. versionadded:: 0.6
-           The `setMultiProcessing` method.
+      :param numreplace: the number of individuals
 
-        """
-        if type(flag) != BooleanType:
-            Util.raiseException("Multiprocessing option must be True or False", TypeError)
+      .. versionadded:: 0.6
+         The *setElitismReplacement* method.
 
-        if type(full_copy) != BooleanType:
-            Util.raiseException("Multiprocessing 'full_copy' option must be True or False", TypeError)
+      """
+      if numreplace < 1:
+         Util.raiseException("Replacement number must be >= 1", ValueError)
+      self.nElitismReplacement = numreplace
 
-        self.internalPop.setMultiProcessing(flag, full_copy, max_processes)
 
-    def setMigrationAdapter(self, migration_adapter=None):
-        """ Sets the Migration Adapter
+   def setInteractiveMode(self, flag=True):
+      """ Enable/disable the interactive mode
 
-        .. versionadded:: 0.6
-           The `setMigrationAdapter` method.
-        """
+      :param flag: True or False
 
-        self.migrationAdapter = migration_adapter
-        if self.migrationAdapter is not None:
-            self.migrationAdapter.setGAEngine(self)
+      .. versionadded: 0.6
+         The *setInteractiveMode* method.
 
-    def setDBAdapter(self, dbadapter=None):
-        """ Sets the DB Adapter of the GA Engine
+      """
+      if type(flag) != BooleanType:
+         Util.raiseException("Interactive Mode option must be True or False", TypeError)
+      self.interactiveMode = flag
 
-        :param dbadapter: one of the :mod:`DBAdapters` classes instance
 
-        .. warning:: the use the of a DB Adapter can reduce the speed performance of the
-                     Genetic Algorithm.
-        """
-        if (dbadapter is not None) and (not isinstance(dbadapter, DBBaseAdapter)):
-            Util.raiseException("The DB Adapter must be a DBBaseAdapter subclass", TypeError)
-        self.dbAdapter = dbadapter
+   def __repr__(self):
+      """ The string representation of the GA Engine """
+      ret =  "- GSimpleGA\n"
+      ret += "\tGP Mode:\t\t %s\n" % self.getGPMode()
+      ret += "\tPopulation Size:\t %d\n" % (self.internalPop.popSize,)
+      ret += "\tGenerations:\t\t %d\n" % (self.nGenerations,)
+      ret += "\tCurrent Generation:\t %d\n" % (self.currentGeneration,)
+      ret += "\tMutation Rate:\t\t %.2f\n" % (self.pMutation,)
+      ret += "\tCrossover Rate:\t\t %.2f\n" % (self.pCrossover,)
+      ret += "\tMinimax Type:\t\t %s\n" % (Consts.minimaxType.keys()[Consts.minimaxType.values().index(self.minimax)].capitalize(),)
+      ret += "\tElitism:\t\t %s\n" % (self.elitism,)
+      ret += "\tElitism Replacement:\t %d\n" % (self.nElitismReplacement,)
+      ret += "\tDB Adapter:\t\t %s\n" % (self.dbAdapter,)
+      for slot in self.allSlots:
+         ret+= "\t" + slot.__repr__()
+      ret+="\n"
+      return ret
 
-    def setPopulationSize(self, size):
-        """ Sets the population size, calls setPopulationSize() of GPopulation
+   def setMultiProcessing(self, flag=True, full_copy=False):
+      """ Sets the flag to enable/disable the use of python multiprocessing module.
+      Use this option when you have more than one core on your CPU and when your
+      evaluation function is very slow.
 
-        :param size: the population size
+      Pyevolve will automaticly check if your Python version has **multiprocessing**
+      support and if you have more than one single CPU core. If you don't have support
+      or have just only one core, Pyevolve will not use the **multiprocessing**
+      feature.
 
-        .. note:: the population size must be >= 2
+      Pyevolve uses the **multiprocessing** to execute the evaluation function over
+      the individuals, so the use of this feature will make sense if you have a
+      truly slow evaluation function (which is commom in GAs).
 
-        """
-        if size < 2:
-            Util.raiseException("population size must be >= 2", ValueError)
-        self.internalPop.setPopulationSize(size)
+      The parameter "full_copy" defines where the individual data should be copied back
+      after the evaluation or not. This parameter is useful when you change the
+      individual in the evaluation function.
 
-    def setSortType(self, sort_type):
-        """ Sets the sort type, Consts.sortType["raw"]/Consts.sortType["scaled"]
+      :param flag: True (default) or False
+      :param full_copy: True or False (default)
 
-        Example:
-           >>> ga_engine.setSortType(Consts.sortType["scaled"])
+      .. warning:: Use this option only when your evaluation function is slow, so you'll
+                   get a good tradeoff between the process communication speed and the
+                   parallel evaluation. The use of the **multiprocessing** doesn't means
+                   always a better performance.
 
-        :param sort_type: the Sort Type
+      .. note:: To enable the multiprocessing option, you **MUST** add the *__main__* check
+                on your application, otherwise, it will result in errors. See more on the
+                `Python Docs <http://docs.python.org/library/multiprocessing.html#multiprocessing-programming>`__
+                site.
 
-        """
-        if sort_type not in Consts.sortType.values():
-            Util.raiseException("sort type must be a Consts.sortType type", TypeError)
-        self.internalPop.sortType = sort_type
+      .. versionadded:: 0.6
+         The `setMultiProcessing` method.
 
-    def setMutationRate(self, rate):
-        """ Sets the mutation rate, between 0.0 and 1.0
+      """
+      if type(flag) != BooleanType:
+         Util.raiseException("Multiprocessing option must be True or False", TypeError)
 
-        :param rate: the rate, between 0.0 and 1.0
+      if type(full_copy) != BooleanType:
+         Util.raiseException("Multiprocessing 'full_copy' option must be True or False", TypeError)
 
-        """
-        if (rate > 1.0) or (rate < 0.0):
-            Util.raiseException("Mutation rate must be >= 0.0 and <= 1.0", ValueError)
-        self.pMutation = rate
+      self.internalPop.setMultiProcessing(flag, full_copy)
 
-    def setCrossoverRate(self, rate):
-        """ Sets the crossover rate, between 0.0 and 1.0
+   def setMigrationAdapter(self, migration_adapter=None):
+      """ Sets the Migration Adapter
 
-        :param rate: the rate, between 0.0 and 1.0
+      .. versionadded:: 0.6
+         The `setMigrationAdapter` method.
+      """
 
-        """
-        if (rate > 1.0) or (rate < 0.0):
-            Util.raiseException("Crossover rate must be >= 0.0 and <= 1.0", ValueError)
-        self.pCrossover = rate
+      self.migrationAdapter = migration_adapter
+      if self.migrationAdapter is not None:
+         self.migrationAdapter.setGAEngine(self)
 
-    def setGenerations(self, num_gens):
-        """ Sets the number of generations to evolve
+   def setDBAdapter(self, dbadapter=None):
+      """ Sets the DB Adapter of the GA Engine
 
-        :param num_gens: the number of generations
+      :param dbadapter: one of the :mod:`DBAdapters` classes instance
 
-        """
-        if num_gens < 1:
-            Util.raiseException("Number of generations must be >= 1", ValueError)
-        self.nGenerations = num_gens
+      .. warning:: the use the of a DB Adapter can reduce the speed performance of the
+                   Genetic Algorithm.
+      """
+      if (dbadapter is not None) and (not isinstance(dbadapter, DBBaseAdapter)):
+         Util.raiseException("The DB Adapter must be a DBBaseAdapter subclass", TypeError)
+      self.dbAdapter = dbadapter
 
-    def getGenerations(self):
-        """ Return the number of generations to evolve
+   def setPopulationSize(self, size):
+      """ Sets the population size, calls setPopulationSize() of GPopulation
 
-        :rtype: the number of generations
+      :param size: the population size
 
-        .. versionadded:: 0.6
-           Added the *getGenerations* method
-        """
-        return self.nGenerations
+      .. note:: the population size must be >= 2
 
-    def getMinimax(self):
-        """ Gets the minimize/maximize mode
+      """
+      if size < 2:
+         Util.raiseException("population size must be >= 2", ValueError)
+      self.internalPop.setPopulationSize(size)
 
-        :rtype: the Consts.minimaxType type
+   def setSortType(self, sort_type):
+      """ Sets the sort type, Consts.sortType["raw"]/Consts.sortType["scaled"]
 
-        """
-        return self.minimax
+      Example:
+         >>> ga_engine.setSortType(Consts.sortType["scaled"])
 
-    def setMinimax(self, mtype):
-        """ Sets the minimize/maximize mode, use Consts.minimaxType
+      :param sort_type: the Sort Type
 
-        :param mtype: the minimax mode, from Consts.minimaxType
+      """
+      if sort_type not in Consts.sortType.values():
+         Util.raiseException("sort type must be a Consts.sortType type", TypeError)
+      self.internalPop.sortType = sort_type
 
-        """
-        if mtype not in Consts.minimaxType.values():
-            Util.raiseException("Minimax must be maximize or minimize", TypeError)
-        self.minimax = mtype
+   def setMutationRate(self, rate):
+      """ Sets the mutation rate, between 0.0 and 1.0
 
-    def getCurrentGeneration(self):
-        """ Gets the current generation
+      :param rate: the rate, between 0.0 and 1.0
 
-        :rtype: the current generation
+      """
+      if (rate>1.0) or (rate<0.0):
+         Util.raiseException("Mutation rate must be >= 0.0 and <= 1.0", ValueError)
+      self.pMutation = rate
 
-        """
-        return self.currentGeneration
+   def setCrossoverRate(self, rate):
+      """ Sets the crossover rate, between 0.0 and 1.0
 
-    def setElitism(self, flag):
-        """ Sets the elitism option, True or False
+      :param rate: the rate, between 0.0 and 1.0
 
-        :param flag: True or False
+      """
+      if (rate>1.0) or (rate<0.0):
+         Util.raiseException("Crossover rate must be >= 0.0 and <= 1.0", ValueError)
+      self.pCrossover = rate
 
-        """
-        if type(flag) != BooleanType:
-            Util.raiseException("Elitism option must be True or False", TypeError)
-        self.elitism = flag
+   def setGenerations(self, num_gens):
+      """ Sets the number of generations to evolve
 
-    def getDBAdapter(self):
-        """ Gets the DB Adapter of the GA Engine
+      :param num_gens: the number of generations
 
-        :rtype: a instance from one of the :mod:`DBAdapters` classes
+      """
+      if num_gens < 1:
+         Util.raiseException("Number of generations must be >= 1", ValueError)
+      self.nGenerations = num_gens
 
-        """
-        return self.dbAdapter
+   def getGenerations(self):
+      """ Return the number of generations to evolve
 
-    def setMaxTime(self, seconds):
-        """ Sets the maximun evolve time of the GA Engine
+      :rtype: the number of generations
 
-        :param seconds: maximum time in seconds
-        """
-        self.max_time = seconds
+      .. versionadded:: 0.6
+         Added the *getGenerations* method
+      """
+      return self.nGenerations
 
-    def getMaxTime(self):
-        """ Get the maximun evolve time of the GA Engine
+   def getMinimax(self):
+      """ Gets the minimize/maximize mode
 
-        :rtype: True or False
-        """
-        return self.max_time
+      :rtype: the Consts.minimaxType type
 
-    def bestIndividual(self):
-        """ Returns the population best individual
+      """
+      return self.minimax
 
-        :rtype: the best individual
+   def setMinimax(self, mtype):
+      """ Sets the minimize/maximize mode, use Consts.minimaxType
 
-        """
-        return self.internalPop.bestRaw()
+      :param mtype: the minimax mode, from Consts.minimaxType
 
-    def worstIndividual(self):
-        """ Returns the population worst individual
+      """
+      if mtype not in Consts.minimaxType.values():
+         Util.raiseException("Minimax must be maximize or minimize", TypeError)
+      self.minimax = mtype
 
-        :rtype: the best individual
+   def getCurrentGeneration(self):
+      """ Gets the current generation
 
-        """
-        return self.internalPop.worstRaw()
+      :rtype: the current generation
 
-    def __gp_catch_functions(self, prefix):
-        """ Internally used to catch functions with some specific prefix
-        as non-terminals of the GP core """
-        import __main__ as mod_main
+      """
+      return self.currentGeneration
 
-        function_set = {}
+   def setElitism(self, flag):
+      """ Sets the elitism option, True or False
 
-        main_dict = mod_main.__dict__
-        for obj, addr in main_dict.items():
-            if obj[0:len(prefix)] == prefix:
-                try:
-                    op_len = addr.func_code.co_argcount
-                except:
-                    continue
-                function_set[obj] = op_len
+      :param flag: True or False
 
-        if len(function_set) <= 0:
-            Util.raiseException("No function set found using function prefix '%s' !" % prefix, ValueError)
+      """
+      if type(flag) != BooleanType:
+         Util.raiseException("Elitism option must be True or False", TypeError)
+      self.elitism = flag
 
-        self.setParams(gp_function_set=function_set)
+   def getDBAdapter(self):
+      """ Gets the DB Adapter of the GA Engine
 
-    def initialize(self):
-        """ Initializes the GA Engine. Create and initialize population """
-        self.internalPop.create(minimax=self.minimax)
-        self.internalPop.initialize(ga_engine=self)
-        logging.debug("The GA Engine was initialized !")
+      :rtype: a instance from one of the :mod:`DBAdapters` classes
 
-    def getPopulation(self):
-        """ Return the internal population of GA Engine
+      """
+      return self.dbAdapter
 
-        :rtype: the population (:class:`GPopulation.GPopulation`)
+   def bestIndividual(self):
+      """ Returns the population best individual
 
-        """
-        return self.internalPop
+      :rtype: the best individual
 
-    def getStatistics(self):
-        """ Gets the Statistics class instance of current generation
+      """
+      return self.internalPop.bestRaw()
 
-        :rtype: the statistics instance (:class:`Statistics.Statistics`)
+   def __gp_catch_functions(self, prefix):
+      """ Internally used to catch functions with some specific prefix
+      as non-terminals of the GP core """
+      import __main__ as mod_main
 
-        """
-        return self.internalPop.getStatistics()
+      function_set = {}
 
-    def step(self):
-        """ Just do one step in evolution, one generation """
-        newPop = GPopulation(self.internalPop)
-        logging.debug("Population was cloned.")
+      main_dict = mod_main.__dict__
+      for obj, addr in main_dict.items():
+         if obj[0:len(prefix)] == prefix:
+            try:
+               op_len = addr.func_code.co_argcount
+            except:
+               continue
+            function_set[obj] = op_len
 
-        size_iterate = len(self.internalPop)
+      if len(function_set) <= 0:
+         Util.raiseException("No function set found using function prefix '%s' !" % prefix, ValueError)
 
-        # Odd population size
-        if size_iterate % 2 != 0:
-            size_iterate -= 1
+      self.setParams(gp_function_set=function_set)
 
-        crossover_empty = self.select(popID=self.currentGeneration).crossover.isEmpty()
+   def initialize(self):
+      """ Initializes the GA Engine. Create and initialize population """
+      self.internalPop.create(minimax=self.minimax)
+      self.internalPop.initialize(ga_engine=self)
+      logging.debug("The GA Engine was initialized !")
 
-        for i in xrange(0, size_iterate, 2):
-            genomeMom = self.select(popID=self.currentGeneration)
-            genomeDad = self.select(popID=self.currentGeneration)
+   def getPopulation(self):
+      """ Return the internal population of GA Engine
 
-            if not crossover_empty and self.pCrossover >= 1.0:
+      :rtype: the population (:class:`GPopulation.GPopulation`)
+
+      """
+      return self.internalPop
+
+   def getStatistics(self):
+      """ Gets the Statistics class instance of current generation
+
+      :rtype: the statistics instance (:class:`Statistics.Statistics`)
+
+      """
+      return self.internalPop.getStatistics()
+
+   def step(self):
+      """ Just do one step in evolution, one generation """
+      genomeMom = None
+      genomeDad = None
+
+      newPop = GPopulation(self.internalPop)
+
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+          popsize = len(self.internalPop)
+          numAdded = 0
+          maxTries = 1000
+          numTries = 0
+
+          crossover_empty = self.select(popID=self.currentGeneration).crossover.isEmpty()
+
+          ###TODO: enforce constraints!###
+          while numAdded < popsize:
+             genomeMom = self.select(popID=self.currentGeneration)
+             genomeDad = self.select(popID=self.currentGeneration)
+
+             if not crossover_empty and self.pCrossover >= 1.0:
                 for it in genomeMom.crossover.applyFunctions(mom=genomeMom, dad=genomeDad, count=2):
-                    (sister, brother) = it
-            else:
+                   (sister, brother) = it
+             else:
                 if not crossover_empty and Util.randomFlipCoin(self.pCrossover):
-                    for it in genomeMom.crossover.applyFunctions(mom=genomeMom, dad=genomeDad, count=2):
-                        (sister, brother) = it
+                   for it in genomeMom.crossover.applyFunctions(mom=genomeMom, dad=genomeDad, count=2):
+                      (sister, brother) = it
                 else:
-                    sister = genomeMom.clone()
-                    brother = genomeDad.clone()
+                   sister = genomeMom.clone()
+                   brother = genomeDad.clone()
+    #               logging.debug("done cloning")
 
-            sister.mutate(pmut=self.pMutation, ga_engine=self)
-            brother.mutate(pmut=self.pMutation, ga_engine=self)
+             sister.mutate(pmut=self.pMutation, ga_engine=self)
+             brother.mutate(pmut=self.pMutation, ga_engine=self)
 
-            newPop.internalPop.append(sister)
-            newPop.internalPop.append(brother)
+             if (numTries > maxTries or self.owner.eval_constraints(sister)):
+                newPop.internalPop.append(sister)
+                numAdded += 1
+                print "successfully added sister"
+             if (numAdded < popsize and (numTries > maxTries or self.owner.eval_constraints(brother))):
+                newPop.internalPop.append(brother)
+                print "successfully added brother"
+                numAdded += 1
+             numTries += 1
 
-        if len(self.internalPop) % 2 != 0:
-            genomeMom = self.select(popID=self.currentGeneration)
-            genomeDad = self.select(popID=self.currentGeneration)
+      #end rank0 onlye
+    #      print "rank %d start eval pop" % MPI.COMM_WORLD.Get_rank()
 
-            if Util.randomFlipCoin(self.pCrossover):
-                for it in genomeMom.crossover.applyFunctions(mom=genomeMom, dad=genomeDad, count=1):
-                    (sister, brother) = it
-            else:
-                sister = random.choice([genomeMom, genomeDad])
-                sister = sister.clone()
-                sister.mutate(pmut=self.pMutation, ga_engine=self)
+      logging.debug("Evaluating the newly created population.")
+      newPop.evaluate()
+#      print "rank %d done eval pop" % MPI.COMM_WORLD.Get_rank()
+#      if (MPI.COMM_WORLD.Get_rank() == 0):
+#         print "after eval, new pop's positions are:"
+#         for p in newPop:
+#            print p.wt_positions
 
-            newPop.internalPop.append(sister)
-
-        logging.debug("Evaluating the new created population.")
-        newPop.evaluate()
-
-        if self.elitism:
-            logging.debug("Doing elitism.")
-            if self.getMinimax() == Consts.minimaxType["maximize"]:
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+          if self.elitism:
+             logging.debug("Doing elitism, %d" % self.nElitismReplacement)
+             if self.getMinimax() == Consts.minimaxType["maximize"]:
                 for i in xrange(self.nElitismReplacement):
-                    #re-evaluate before being sure this is the best
-                    self.internalPop.bestRaw(i).evaluate()
-                    if self.internalPop.bestRaw(i).score > newPop.bestRaw(i).score:
-                        newPop[len(newPop) - 1 - i] = self.internalPop.bestRaw(i)
-            elif self.getMinimax() == Consts.minimaxType["minimize"]:
+                   #re-evaluate before being sure this is the best
+    #               self.internalPop.bestRaw(i).evaluate()
+                   if self.internalPop.bestRaw(i).score > newPop.bestRaw(i).score:
+                      newPop[len(newPop)-1-i] = self.internalPop.bestRaw(i)
+             elif self.getMinimax() == Consts.minimaxType["minimize"]:
                 for i in xrange(self.nElitismReplacement):
-                    #re-evaluate before being sure this is the best
-                    self.internalPop.bestRaw(i).evaluate()
-                    if self.internalPop.bestRaw(i).score < newPop.bestRaw(i).score:
-                        newPop[len(newPop) - 1 - i] = self.internalPop.bestRaw(i)
+                   #re-evaluate before being sure this is the best
+    #               self.internalPop.bestRaw(i).evaluate()
+                   if self.internalPop.bestRaw(i).score < newPop.bestRaw(i).score:
+                      newPop[len(newPop)-1-i] = self.internalPop.bestRaw(i)
 
-        self.internalPop = newPop
-        self.internalPop.sort()
+      self.internalPop = newPop
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+         self.internalPop.sort()
+#      if (MPI.COMM_WORLD.Get_rank() == 0):
+#         print "after sort, internal pop's positions are:"
+#         for p in self.internalPop:
+#            print p.wt_positions
 
-        logging.debug("The generation %d was finished.", self.currentGeneration)
+      logging.debug("The generation %d was finished.", self.currentGeneration)
+      self.currentGeneration += 1
 
-        self.currentGeneration += 1
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+         self.saveState ()
 
-        if self.max_time:
-           total_time = time() - self.time_init
-           if total_time > self.max_time:
-              return True
-        return self.currentGeneration == self.nGenerations
+      return (self.currentGeneration == self.nGenerations)
 
-    def printStats(self):
-        """ Print generation statistics
+   def saveState(self):
+      self.owner.saveState(self.internalPop.internalPop, self.currentGeneration)
 
-        :rtype: the printed statistics as string
+   def restoreState(self, gen):
+      self.owner.restoreState(self.internalPop.internalPop, gen)
+      self.currentGeneration = gen
 
-        .. versionchanged:: 0.6
-           The return of *printStats* method.
-        """
-        percent = self.currentGeneration * 100 / float(self.nGenerations)
-        message = "Gen. %d (%.2f%%):" % (self.currentGeneration, percent)
-        logging.info(message)
-        print message,
-        sys_stdout.flush()
-        self.internalPop.statistics()
-        stat_ret = self.internalPop.printStats()
-        return message + stat_ret
+   def printStats(self):
+      """ Print generation statistics
 
-    def printTimeElapsed(self):
-        """ Shows the time elapsed since the begin of evolution """
-        total_time = time() - self.time_init
-        print "Total time elapsed: %.3f seconds." % total_time
-        return total_time
+      :rtype: the printed statistics as string
 
-    def dumpStatsDB(self):
-        """ Dumps the current statistics to database adapter """
-        logging.debug("Dumping stats to the DB Adapter")
-        self.internalPop.statistics()
-        self.dbAdapter.insert(self)
+      .. versionchanged:: 0.6
+         The return of *printStats* method.
+      """
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+          percent = self.currentGeneration * 100 / float(self.nGenerations)
+          message = "Gen. %d (%.2f%%):" % (self.currentGeneration, percent)
+          logging.info(message)
+          print message,
+          sys_stdout.flush()
+          self.internalPop.statistics()
+          stat_ret = self.internalPop.printStats()
+          return message + stat_ret
+      else:
+         return ""
 
-    def evolve(self, freq_stats=0):
-        """ Do all the generations until the termination criteria, accepts
-        the freq_stats (default is 0) to dump statistics at n-generation
+   def printTimeElapsed(self):
+      """ Shows the time elapsed since the begin of evolution """
+      total_time = time()-self.time_init
+      print "Total time elapsed: %.3f seconds." % total_time
+      return total_time
 
-        Example:
-           >>> ga_engine.evolve(freq_stats=10)
-           (...)
+   def dumpStatsDB(self):
+      """ Dumps the current statistics to database adapter """
+      logging.debug("Dumping stats to the DB Adapter")
+      self.internalPop.statistics()
+      self.dbAdapter.insert(self)
 
-        :param freq_stats: if greater than 0, the statistics will be
-                           printed every freq_stats generation.
-        :rtype: returns the best individual of the evolution
+   def evolve(self, freq_stats=0, restore=-1):
+      """ Do all the generations until the termination criteria, accepts
+      the freq_stats (default is 0) to dump statistics at n-generation
 
-        .. versionadded:: 0.6
-           the return of the best individual
+      Example:
+         >>> ga_engine.evolve(freq_stats=10)
+         (...)
 
-        """
+      :param freq_stats: if greater than 0, the statistics will be
+                         printed every freq_stats generation.
+      :rtype: returns the best individual of the evolution
 
-        stopFlagCallback = False
-        stopFlagTerminationCriteria = False
+      .. versionadded:: 0.6
+         the return of the best individual
 
-        self.time_init = time()
+      """
 
-        logging.debug("Starting the DB Adapter and the Migration Adapter if any")
-        if self.dbAdapter:
-            self.dbAdapter.open(self)
-        if self.migrationAdapter:
-            self.migrationAdapter.start()
+      stopFlagCallback = False
+      stopFlagTerminationCriteria = False
 
-        if self.getGPMode():
-            gp_function_prefix = self.getParam("gp_function_prefix")
-            if gp_function_prefix is not None:
-                self.__gp_catch_functions(gp_function_prefix)
+      self.time_init = time()
 
-        self.initialize()
-        self.internalPop.evaluate()
-        self.internalPop.sort()
-        logging.debug("Starting loop over evolutionary algorithm.")
+      logging.debug("Starting the DB Adapter and the Migration Adapter if any")
+      if self.dbAdapter: self.dbAdapter.open(self)
+      if self.migrationAdapter: self.migrationAdapter.start()
 
-        try:
-            while True:
-                if self.migrationAdapter:
-                    logging.debug("Migration adapter: exchange")
-                    self.migrationAdapter.exchange()
-                    self.internalPop.clearFlags()
-                    self.internalPop.sort()
 
-                if not self.stepCallback.isEmpty():
-                    for it in self.stepCallback.applyFunctions(self):
-                        stopFlagCallback = it
+      if self.getGPMode():
+         gp_function_prefix = self.getParam("gp_function_prefix")
+         if gp_function_prefix is not None:
+            self.__gp_catch_functions(gp_function_prefix)
 
-                if not self.terminationCriteria.isEmpty():
-                    for it in self.terminationCriteria.applyFunctions(self):
-                        stopFlagTerminationCriteria = it
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+         self.initialize()
+         if (restore >= 0):
+            self.restoreState(restore)
 
-                if freq_stats:
-                    if (self.currentGeneration % freq_stats == 0) or (self.getCurrentGeneration() == 0):
-                        self.printStats()
+      self.internalPop.evaluate()
 
-                if self.dbAdapter:
-                    if self.currentGeneration % self.dbAdapter.getStatsGenFreq() == 0:
-                        self.dumpStatsDB()
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+         self.internalPop.sort()
+#      from mpi4py import MPI
+#      if (MPI.COMM_WORLD.Get_rank() == 0):
+#         print "after eval, new pop's positions are:"
+#         for p in self.internalPop:
+#            print p.wt_positions
+      logging.debug("Starting loop over evolutionary algorithm.")
 
-                if stopFlagTerminationCriteria:
-                    logging.debug("Evolution stopped by the Termination Criteria !")
-                    if freq_stats:
-                        print "\n\tEvolution stopped by Termination Criteria function !\n"
-                    break
+      while True:
+         if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+            if self.migrationAdapter:
+               logging.debug("Migration adapter: exchange")
+               self.migrationAdapter.exchange()
+               self.internalPop.clearFlags()
+               self.internalPop.sort()
 
-                if stopFlagCallback:
-                    logging.debug("Evolution stopped by Step Callback function !")
-                    if freq_stats:
-                        print "\n\tEvolution stopped by Step Callback function !\n"
-                    break
+            if not self.stepCallback.isEmpty():
+               for it in self.stepCallback.applyFunctions(self):
+                  stopFlagCallback = it
 
-                if self.interactiveMode:
-                    if sys_platform[:3] == "win":
-                        if msvcrt.kbhit():
-                            if ord(msvcrt.getch()) == Consts.CDefESCKey:
-                                print "Loading modules for Interactive Mode...",
-                                logging.debug(
-                                    "Windows Interactive Mode key detected ! generation=%d",
-                                    self.getCurrentGeneration()
-                                )
-                                from pyevolve import Interaction
-                                print " done !"
-                                interact_banner = "## Pyevolve v.%s - Interactive Mode ##\n" \
-                                                  "Press CTRL-Z to quit interactive mode." % (pyevolve.__version__,)
-                                session_locals = {
-                                    "ga_engine": self,
-                                    "population": self.getPopulation(),
-                                    "pyevolve": pyevolve,
-                                    "it": Interaction,
-                                }
-                                print
-                                code.interact(interact_banner, local=session_locals)
+            if not self.terminationCriteria.isEmpty():
+               for it in self.terminationCriteria.applyFunctions(self):
+                  stopFlagTerminationCriteria = it
 
-                    is_interactive_generation = self.getInteractiveGeneration() == self.getCurrentGeneration()
-                    if self.getInteractiveGeneration() >= 0 and is_interactive_generation:
+            if freq_stats:
+               if (self.currentGeneration % freq_stats == 0) or (self.getCurrentGeneration() == 0):
+                  self.printStats()
+
+            if self.dbAdapter:
+               if self.currentGeneration % self.dbAdapter.getStatsGenFreq() == 0:
+                  self.dumpStatsDB()
+
+            if stopFlagTerminationCriteria:
+               logging.debug("Evolution stopped by the Termination Criteria !")
+               if freq_stats:
+                  print "\n\tEvolution stopped by Termination Criteria function !\n"
+               break
+
+            if stopFlagCallback:
+               logging.debug("Evolution stopped by Step Callback function !")
+               if freq_stats:
+                  print "\n\tEvolution stopped by Step Callback function !\n"
+               break
+
+            if self.interactiveMode:
+               if sys_platform[:3] == "win":
+                  if msvcrt.kbhit():
+                     if ord(msvcrt.getch()) == Consts.CDefESCKey:
                         print "Loading modules for Interactive Mode...",
-                        logging.debug(
-                            "Manual Interactive Mode key detected ! generation=%d",
-                            self.getCurrentGeneration()
-                        )
+                        logging.debug("Windows Interactive Mode key detected ! generation=%d", self.getCurrentGeneration())
                         from pyevolve import Interaction
                         print " done !"
-                        interact_banner = "## Pyevolve v.%s - Interactive Mode ##" % (pyevolve.__version__,)
-                        session_locals = {
-                            "ga_engine": self,
-                            "population": self.getPopulation(),
-                            "pyevolve": pyevolve,
-                            "it": Interaction
-                        }
+                        interact_banner = "## Pyevolve v.%s - Interactive Mode ##\nPress CTRL-Z to quit interactive mode." % (pyevolve.__version__,)
+                        session_locals = { "ga_engine"  : self,
+                                           "population" : self.getPopulation(),
+                                           "pyevolve"   : pyevolve,
+                                           "it"         : Interaction}
                         print
                         code.interact(interact_banner, local=session_locals)
 
-                if self.step():
-                    break
+               if (self.getInteractiveGeneration() >= 0) and (self.getInteractiveGeneration() == self.getCurrentGeneration()):
+                        print "Loading modules for Interactive Mode...",
+                        logging.debug("Manual Interactive Mode key detected ! generation=%d", self.getCurrentGeneration())
+                        from pyevolve import Interaction
+                        print " done !"
+                        interact_banner = "## Pyevolve v.%s - Interactive Mode ##" % (pyevolve.__version__,)
+                        session_locals = { "ga_engine"  : self,
+                                           "population" : self.getPopulation(),
+                                           "pyevolve"   : pyevolve,
+                                           "it"         : Interaction}
+                        print
+                        code.interact(interact_banner, local=session_locals)
+         ## end, rank0 only
+         if self.step(): break
 
-        except KeyboardInterrupt:
-            logging.debug("CTRL-C detected, finishing evolution.")
-            if freq_stats:
-                print "\n\tA break was detected, you have interrupted the evolution !\n"
 
-        if freq_stats != 0:
+      if (MPI.COMM_WORLD.Get_rank() == 0): ### assumes WE are on top of hierarchy!
+         if freq_stats != 0:
             self.printStats()
             self.printTimeElapsed()
 
-        if self.dbAdapter:
+         if self.dbAdapter:
             logging.debug("Closing the DB Adapter")
             if not (self.currentGeneration % self.dbAdapter.getStatsGenFreq() == 0):
-                self.dumpStatsDB()
+               self.dumpStatsDB()
             self.dbAdapter.commitAndClose()
 
-        if self.migrationAdapter:
+         if self.migrationAdapter:
             logging.debug("Closing the Migration Adapter")
+            if freq_stats: print "Stopping the migration adapter... ",
             self.migrationAdapter.stop()
+            if freq_stats: print "done !"
 
-        return self.bestIndividual()
+         return self.bestIndividual()
+      else:
+         return None
 
-    def select(self, **args):
-        """ Select one individual from population
+   def select(self, **args):
+      """ Select one individual from population
 
-        :param args: this parameters will be sent to the selector
+      :param args: this parameters will be sent to the selector
 
-        """
-        for it in self.selector.applyFunctions(self.internalPop, **args):
-            return it
+      """
+      for it in self.selector.applyFunctions(self.internalPop, **args):
+         return it
